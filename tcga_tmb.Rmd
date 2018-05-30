@@ -1,0 +1,97 @@
+---
+title: "TMB TCGA analysis"
+output: github_document
+---
+
+```{r}
+# TMB TCGA check
+library(tidyverse)
+library(bedr)
+#library(rtracklayer)
+library(splitstackshape)
+library(gridExtra)
+library(scales)
+setwd("/mnt/hgfs/danhovelson/Box Sync/Strata/")
+
+# keep coding variation only
+#tcga <- tcgaraw[!tcgaraw$Variant_Classification %in% #c("Intron","3'Flank","3'UTR","5'Flank","5'UTR","RNA","Splice_Site","Translation_Start_Site"),]
+#save(tcga,file="../../analysis/tmb/20180525.tcga_pancx_coding_variants.rda")
+load("../analysis/tmb/20180525.tcga_pancx_coding_variants.rda")
+```
+
+```{r}
+# set index variable
+tcga$variant_id <- row.names(tcga)
+
+# calculate variant_fraction
+tcga$VF <- tcga$t_alt_count / tcga$t_depth
+tcga$VFcat <- cut(tcga$VF,c(seq(0,1.0,0.1)),include.lowest=TRUE)
+  
+# grab position info for subsetting
+tcga_pos <- tcga %>%
+  #filter(Chromosome %in% c(1)) %>%
+  select(variant_id,Chromosome,Start_Position,End_Position)
+colnames(tcga_pos) = c("variant_id","chr","start","stop")
+
+# calc exome mutations per sample (by var fraction)
+exomemuts <- as.data.frame(table(tcga$Tumor_Sample_Barcode,tcga$VFcat))
+```
+
+```{r}
+# reformat df
+tcga_pos2 <- tcga_pos[,c("chr","start","stop","variant_id")]
+#write_tsv(tcga_pos2,"../analysis/tmb/20180525.tcga_pancx_coding_variants.pos_idx.txt")
+
+# ingest tcga-in-TML index
+tcga_tml_idx <- read_tsv("../analysis/tmb/20180525.tcga_pancx_coding_variants.IN_TML.uniq.bed",col_names = FALSE)
+colnames(tcga_tml_idx) <- c("Chromosome","Start_Position","End_Position","variant_id")
+
+# filter TCGA calls to those in TML regions
+tcga_tml <- tcga %>%
+  filter(tcga$variant_id %in% unique(tcga_tml_idx$variant_id))
+
+# calculate sample 'in-TML' totals (by variant fraciton)
+tmlmuts <- as.data.frame(table(tcga_tml$Tumor_Sample_Barcode,tcga_tml$VFcat))
+```
+
+```{r}
+# read in sample index
+tcga_samps <- read_csv("../analysis/tmb/tcga_sample_table.csv")
+
+# combine exome/tcga muts
+compcalls <- exomemuts %>%
+  left_join(tmlmuts,by=c("Var1","Var2")) 
+
+colnames(compcalls) = c("Tumor_Sample_Barcode","VFcat","ExomeMuts","TMLMuts")
+
+compcalls2 <- cSplit(compcalls,
+                    splitCols = "Tumor_Sample_Barcode",
+                    sep="-",
+                    drop = FALSE)
+```
+
+```{r}
+compcalls2$bcr_patient_barcode = paste(compcalls2$Tumor_Sample_Barcode_1,compcalls2$Tumor_Sample_Barcode_2,compcalls2$Tumor_Sample_Barcode_3,sep="-")
+
+# calculate muts/mb
+compcallsfin <- compcalls2 %>%
+  select(bcr_patient_barcode,Tumor_Sample_Barcode,VFcat,ExomeMuts,TMLMuts) %>%
+  left_join(tcga_samps,by=c("bcr_patient_barcode")) %>%
+  mutate(TMLMuts2 = ifelse(is.na(TMLMuts),0.1,TMLMuts)) %>%
+  mutate(TMLmb = TMLMuts2/1.5,Exomemb=ExomeMuts/30)
+```
+
+```{r fig1, fig.height = 11, fig.width = 9}
+#knitr::opts_chunk$set(fig.width=9, fig.height=11) 
+# TCGA: mut count comparison
+ggplot(compcallsfin[compcallsfin$TMLMuts2 > 0.1,],aes(Exomemb,TMLmb,color=type)) + 
+  theme_bw() +
+  geom_point(aes(color=type),shape=21,size=1) +
+  geom_smooth(method="lm",color="red") +
+  scale_y_log10("WES Coding Muts/Mb in TML Regions (by Variant Fraction)",breaks=c(0.1,1,10,100,1000),label=comma) +
+  scale_x_log10("All WES Coding Muts/Mb",breaks=c(0.1,1,10,100,1000),label=comma) +
+  facet_wrap(~VFcat) +
+  ggtitle("TCGA Variant Calls: WES vs TML Regions\n[n=9,561 TCGA Samples w/ 1+ Variant in TML regions]") +
+  theme(legend.position="bottom")
+```
+
