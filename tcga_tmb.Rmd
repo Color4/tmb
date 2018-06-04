@@ -59,9 +59,7 @@ tcga$VFcat <- cut(tcga$VF,c(seq(0,1.0,0.25)),include.lowest=TRUE)
 tcga$VFthresh1 <- cut(tcga$VF,c(0,0.1,1.0),include.lowest=TRUE)
 tcga$VFthresh2 <- cut(tcga$VF,c(0,0.15,1.0),include.lowest=TRUE)
 ```
-```{r TCGA VF by depth}
-library("tidyverse")
-
+```{r TCGA VF by depth, eval=FALSE}
 # load total tcga df
 #load("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.trim_cols.rda")
 
@@ -210,25 +208,53 @@ sampleTCGAtml = function(tcgadf = tcga_tml2, # tcga variants data frame
                     sep="-",
                     drop = FALSE)
   submuts2p$bcr_patient_barcode = paste(submuts2p$Tumor_Sample_Barcode_1, submuts2p$Tumor_Sample_Barcode_2, submuts2p$Tumor_Sample_Barcode_3, sep="-")
-  submuts2p$group <- "overall"
   submutsoutp <- submuts2p[,c("bcr_patient_barcode","wes_mut_count","wes_mut_mb","panel_muts","panel_muts_mb","panel_size","iter_num","vfthresh","coverage","group")]
   
   # cat overall and group totals
   submutsoutfin <- rbind(submutsout,submutsoutp)
   
   remove(tcgatruth)
-  return(submutsout)
+  return(submutsoutfin)
 }
 ```
 
 
 ```{r}
+# overall plot
+test <- sampleTCGAtml()
+ggplot(test,aes(panel_muts_mb,wes_mut_mb,color=group)) + 
+  theme_bw() +
+  geom_point() + 
+  facet_wrap(~group,scales="free") +
+  scale_y_log10() +
+  scale_x_log10()
+
+# vf thresholds
+vfthresholds <- c(seq(0,0.25,0.05),0.5)
+
+# loop through list of panel_sizes, iterating pre-specified number of times
+for (i in 1:length(panel_sizes)) {
+  #i = 1
+  for (j in 1:length(niterations)) {
+    #j = 1
+    for(k in 1:length(vfthresholds)) {
+      #k = 1
+      master_tbl = sampleTCGA(nlines=panel_sizes[i],iter=niterations[j],vfthresh=vfthresholds[k])
+      vf <- vfthresholds[k]*100
+      iternum <- niterations[j]
+      psize = gsub("\\.","pt",as.character(round(master_tbl[1,"panel_size"],digits=2)))
+      data_file = paste0("/mnt/hgfs/danhovelson/analysis/tmb/tmp/regions_",psize,"mb_n",iternum,"_vf",vf,".data_tbl.txt")
+      write_tsv(master_tbl,path=data_file)
+      remove(master_tbl)
+    }
+  }
+}
 
 ```
 
 
 
-```{r echo=FALSE}
+```{r eval=FALSE}
 # read in sample index
 tcga_samps <- read_csv("/mnt/hgfs/danhovelson/analysis/tmb/tcga_sample_table.csv")
 
