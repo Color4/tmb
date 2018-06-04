@@ -11,78 +11,125 @@ library(bedr)
 library(splitstackshape)
 library(gridExtra)
 library(scales)
+library(R.utils)
 setwd("/mnt/hgfs/danhovelson/Box Sync/Strata/")
 
 # keep coding variation only
 #tcga <- tcgaraw[!tcgaraw$Variant_Classification %in% #c("Intron","3'Flank","3'UTR","5'Flank","5'UTR","RNA","Splice_Site","Translation_Start_Site"),]
 #save(tcga,file="../../analysis/tmb/20180525.tcga_pancx_coding_variants.rda")
-load("../analysis/tmb/20180525.tcga_pancx_coding_variants.rda")
+#load("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.rda")
+
+# Keep subset of columns to reduce memory impact
+
+#tcgatrim = tcga[,c("Chromosome","Start_Position","End_Position","Hugo_Symbol","Reference_Allele","Tumor_Seq_Allele1","Tumor_Seq_Allele2","Variant_Type","Variant_Classification","Consequence","Feature_type","VARIANT_CLASS","Tumor_Sample_Barcode","t_depth","t_ref_count","t_alt_count")]
+#save(tcgatrim,file="/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.trim_cols.rda")
+
+load(file="/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.trim_cols.rda")
 ```
 
-```{r}
-# set index variable
-tcga$variant_id <- row.names(tcga)
+```{r "process tcga data"}
+tcga_ = tcgatrim
 
-# calculate variant_fraction
+# set variant_id variable for full tcga coding variant index
+tcgavid <- read_tsv("/mnt/hgfs/danhovelson/analysis/bed/20180525.tcga_pancx_coding_variants.pos_idx.chr.bed",col_names = FALSE)
+colnames(tcgavid) <- c("Chromosome","Start_Position","End_Position","variant_id")
+tcgavid %>%
+  mutate(variant_hash = paste(gsub("chr","",Chromosome),Start_Position,End_Position,sep=";")) %>%
+  select(variant_hash, variant_id) -> tcgavid2
+remove(tcgavid)
+
+# match index variable to detailed tcga calls df
+tcga <- tcga_ %>%
+  mutate(variant_hash = paste(Chromosome,Start_Position,End_Position,sep=";")) %>%
+  left_join(tcgavid2,by=c("variant_hash"))
+remove(tcga_)
+
+# calculate variant_fraction & create categories/thresholds
 tcga$VF <- tcga$t_alt_count / tcga$t_depth
-tcga$VFcat <- cut(tcga$VF,c(seq(0,1.0,0.1)),include.lowest=TRUE)
-  
-# grab position info for subsetting
-tcga_pos <- tcga %>%
-  #filter(Chromosome %in% c(1)) %>%
-  select(variant_id,Chromosome,Start_Position,End_Position)
-colnames(tcga_pos) = c("variant_id","chr","start","stop")
+tcga$VFcat <- cut(tcga$VF,c(seq(0,1.0,0.25)),include.lowest=TRUE)
+tcga$VFthresh1 <- cut(tcga$VF,c(0,0.1,1.0),include.lowest=TRUE)
+tcga$VFthresh2 <- cut(tcga$VF,c(0,0.15,1.0),include.lowest=TRUE)
+```
+
+```{r "TCGA calls in TML regions"}
+# ingest tcga-in-TML index
+tcga_tml_idx_ <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.IN_TML.uniq.bed",col_names = FALSE)
+colnames(tcga_tml_idx_) <- c("Chromosome","Start_Position","End_Position","old_variant_id")
+tcga_tml_idx_ %>%
+  mutate(variant_hash = paste(gsub("chr","",Chromosome),Start_Position,End_Position,sep=";")) %>%
+  left_join(tcgavid2,by=c("variant_hash")) %>%
+  select(-old_variant_id,-variant_hash) -> tcga_tml_idx
+#%>%
+  #select(-old_variant_id,-)
+
+# filter TCGA calls to those in all TML regions
+tcga_tml <- tcga %>%
+  filter(variant_id %in% unique(tcga_tml_idx$variant_id))
+
+## check pool 1 vs pool 2 vs all
+tcga_tml_pool1_idx <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.IN_TML_pool1.bed",col_names = FALSE)
+colnames(tcga_tml_pool1_idx) <- c("Chromosome","Start_Position","End_Position","old_variant_id")
+
+tcga_tml_pool2_idx <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.IN_TML_pool2.bed",col_names = FALSE)
+colnames(tcga_tml_pool2_idx) <- c("Chromosome","Start_Position","End_Position","old_variant_id")
 
 # calc exome mutations per sample (by var fraction)
 exomemuts <- as.data.frame(table(tcga$Tumor_Sample_Barcode,tcga$VFcat))
-```
 
-```{r}
-# reformat df
-tcga_pos2 <- tcga_pos[,c("chr","start","stop","variant_id")]
-#write_tsv(tcga_pos2,"../analysis/tmb/20180525.tcga_pancx_coding_variants.pos_idx.txt")
-
-# ingest tcga-in-TML index
-tcga_tml_idx <- read_tsv("../analysis/tmb/20180525.tcga_pancx_coding_variants.IN_TML.uniq.bed",col_names = FALSE)
-colnames(tcga_tml_idx) <- c("Chromosome","Start_Position","End_Position","variant_id")
-
-# filter TCGA calls to those in TML regions
-tcga_tml <- tcga %>%
-  filter(tcga$variant_id %in% unique(tcga_tml_idx$variant_id))
+# calc exome muts per sample (thresholds1,2)
+exomemuts1 <- as.data.frame(table(tcga$Tumor_Sample_Barcode,tcga$VFthresh1))
+exomemuts2 <- as.data.frame(table(tcga$Tumor_Sample_Barcode,tcga$VFthresh2))
 
 # calculate sample 'in-TML' totals (by variant fraciton)
 tmlmuts <- as.data.frame(table(tcga_tml$Tumor_Sample_Barcode,tcga_tml$VFcat))
+
+# calc exome muts per sample (thresholds1,2)
+tmlmuts1 <- as.data.frame(table(tcga_tml$Tumor_Sample_Barcode,tcga_tml$VFthresh1))
+tmlmuts2 <- as.data.frame(table(tcga_tml$Tumor_Sample_Barcode,tcga_tml$VFthresh2))
 ```
 
-```{r}
+```{r echo=FALSE}
 # read in sample index
-tcga_samps <- read_csv("../analysis/tmb/tcga_sample_table.csv")
+tcga_samps <- read_csv("/mnt/hgfs/danhovelson/analysis/tmb/tcga_sample_table.csv")
 
-# combine exome/tcga muts
+# combine exome/tcga muts (quartiles)
 compcalls <- exomemuts %>%
-  left_join(tmlmuts,by=c("Var1","Var2")) 
+  left_join(tmlmuts,by=c("Var1","Var2")) %>%
+  mutate(cat = "deciles")
+colnames(compcalls) = c("Tumor_Sample_Barcode","VFgroup","ExomeMuts","TMLMuts","Cat")
 
-colnames(compcalls) = c("Tumor_Sample_Barcode","VFcat","ExomeMuts","TMLMuts")
+# combine exome/tcga muts (10% threshold)
+compcalls1 <- exomemuts1 %>%
+  left_join(tmlmuts1,by=c("Var1","Var2"))  %>%
+  mutate(cat = "pct10")
+colnames(compcalls1) = c("Tumor_Sample_Barcode","VFgroup","ExomeMuts","TMLMuts","Cat")
 
-compcalls2 <- cSplit(compcalls,
+# combine exome/tcga muts (1d5% threshold)
+compcalls2 <- exomemuts2 %>%
+  left_join(tmlmuts2,by=c("Var1","Var2"))  %>%
+  mutate(cat = "pct15")
+colnames(compcalls2) = c("Tumor_Sample_Barcode","VFgroup","ExomeMuts","TMLMuts","Cat")
+
+compcalls_ = rbind(compcalls,compcalls1,compcalls2)
+
+compcallsout <- cSplit(compcalls_,
                     splitCols = "Tumor_Sample_Barcode",
                     sep="-",
                     drop = FALSE)
-```
 
-```{r}
-compcalls2$bcr_patient_barcode = paste(compcalls2$Tumor_Sample_Barcode_1,compcalls2$Tumor_Sample_Barcode_2,compcalls2$Tumor_Sample_Barcode_3,sep="-")
-
-# calculate muts/mb
-compcallsfin <- compcalls2 %>%
-  select(bcr_patient_barcode,Tumor_Sample_Barcode,VFcat,ExomeMuts,TMLMuts) %>%
-  left_join(tcga_samps,by=c("bcr_patient_barcode")) %>%
-  mutate(TMLMuts2 = ifelse(is.na(TMLMuts),0.1,TMLMuts)) %>%
-  mutate(TMLmb = TMLMuts2/1.5,Exomemb=ExomeMuts/30)
+# parse tumor specimen barcode - retain sample barcode only
+compcallsout$bcr_patient_barcode = paste(compcallsout$Tumor_Sample_Barcode_1,compcallsout$Tumor_Sample_Barcode_2,compcallsout$Tumor_Sample_Barcode_3,sep="-")
 ```
 
 ```{r fig1, fig.height = 11, fig.width = 9}
-#knitr::opts_chunk$set(fig.width=9, fig.height=11) 
+# Plot comparison to TCGA (all WES mutation calls)
+# calculate muts/mb
+compcallsfin <- compcallsout %>%
+  select(bcr_patient_barcode,Tumor_Sample_Barcode,VFgroup,ExomeMuts,TMLMuts,Cat) %>%
+  left_join(tcga_samps,by=c("bcr_patient_barcode")) %>%
+  mutate(TMLMuts2 = ifelse(is.na(TMLMuts),0.1,TMLMuts)) %>%
+  mutate(TMLmb = TMLMuts2/1.5,Exomemb=ExomeMuts/30)
+
 # TCGA: mut count comparison
 ggplot(compcallsfin[compcallsfin$TMLMuts2 > 0.1,],aes(Exomemb,TMLmb,color=type)) + 
   theme_bw() +
@@ -90,8 +137,262 @@ ggplot(compcallsfin[compcallsfin$TMLMuts2 > 0.1,],aes(Exomemb,TMLmb,color=type))
   geom_smooth(method="lm",color="red") +
   scale_y_log10("WES Coding Muts/Mb in TML Regions (by Variant Fraction)",breaks=c(0.1,1,10,100,1000),label=comma) +
   scale_x_log10("All WES Coding Muts/Mb",breaks=c(0.1,1,10,100,1000),label=comma) +
-  facet_wrap(~VFcat) +
+  facet_wrap(~VFgroup) +
+  ggtitle("TCGA Variant Calls: WES vs TML Regions\n[n=9,561 TCGA Samples w/ 1+ Variant in TML regions]") +
+  theme(legend.position="bottom") 
+```
+
+```{r fig1, fig.height = 5, fig.width = 7}
+# Plot TCGA (VF >10% / >15%)
+compcallsthresh <- compcallsfin[compcallsfin$VFgroup %in% c("(0.1,1]","(0.15,1]") & compcallsfin$ExomeMuts > 0 & !is.na(compcallsfin$type),]
+
+# TCGA: mut count comparison
+ggplot(compcallsthresh, aes(Exomemb,TMLmb,color=type)) + 
+  theme_bw() +
+  geom_point(aes(color=type),shape=21,size=1) +
+  geom_smooth(method="lm",color="red") +
+  scale_y_log10("WES Coding Muts/Mb in TML Regions (by Variant Fraction)",breaks=c(0.1,1,10,100,1000),label=comma) +
+  scale_x_log10("All WES Coding Muts/Mb",breaks=c(0.1,1,10,100,1000),label=comma) +
+  facet_wrap(~VFgroup) +
   ggtitle("TCGA Variant Calls: WES vs TML Regions\n[n=9,561 TCGA Samples w/ 1+ Variant in TML regions]") +
   theme(legend.position="bottom")
+
+# correlations
+cor(compcallsthresh[compcallsthresh$VFgroup %in% c("(0.1,1]"),]$Exomemb,
+     compcallsthresh[compcallsthresh$VFgroup %in% c("(0.1,1]"),]$TMLmb)
+
+cor(compcallsthresh[compcallsthresh$VFgroup %in% c("(0.15,1]"),]$Exomemb,
+     compcallsthresh[compcallsthresh$VFgroup %in% c("(0.15,1]"),]$TMLmb)
+
+```
+
+```{r} 
+# subset tcga calls by vf, create corresponding vf-filtered tables
+tcallspre = "/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants"
+vfs <- c(0,seq(5,50,5),seq(60,100,10))
+#vfs <- c(10,40)
+
+# prevent from running - only need to do once [clean up!]
+if(FALSE) {
+  for (i in 1:length(vfs)) {
+  cvf = vfs[i]
+  
+  # subset / print out tcga calls passing VF threshold
+  tcgatmp <- tcga[tcga$VF >= (cvf/100),c("Tumor_Sample_Barcode","variant_id")]
+  write_tsv(tcgatmp,path=paste0(tcallspre,".wes_muts.gt_vf",cvf,".call_idx.txt")) 
+  
+  # calc mut rates/totals
+  wesmutstmp <- as.data.frame(table(tcgatmp$Tumor_Sample_Barcode))
+  colnames(wesmutstmp) <- c("Tumor_Sample_Barcode","wes_mut_count")
+  wesmutstmp$wes_mut_mb <- wesmutstmp$wes_mut_count/30
+  
+  # write out wes mut rate file
+  write_tsv(wesmutstmp,path=paste0(tcallspre,".wes_muts.gt_vf",cvf,".rate_tbl.txt"))
+  
+  print(paste0("vf ",cvf,": done."))
+  remove(tcgatmp)
+  remove(wesmutstmp)
+  }
+}
+```
+
+
+```{r}
+# sampleTCGA function: Explore TCGA concordance for a given panel size
+# 1) sample N lines from tcga per-base 'callable' bed (niter times)
+# 2) subset tcga calls to those in sampled genomic regions 
+# 3) calculate muts/mb and correlate with WES muts/mb and return
+sampleTCGA = function(tfbed = "/mnt/hgfs/danhovelson/analysis/bed/tcga_gaf_intersection.merge.1bp.bed", # path to base-level tcga coding regions bed file
+                      tpbed = "/mnt/hgfs/danhovelson/analysis/bed/20180525.tcga_pancx_coding_variants.pos_idx.chr.bed", #path to tcga variant call position index file
+                tcgadf = tcga, # tcga variants data frame
+                nlines=1000000, # number of lines to sample 
+                odir = "/mnt/hgfs/danhovelson/analysis/tmb/tmp", # output directory
+                vfthresh = 0, # min variant fraction threshold
+                tcgacallsprefix = "/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.wes_muts.gt_vf", # file prefix for tcga VF-filtered calls
+                panel_size_mb = nlines/1000000, # panel size, in megabases
+                iter = 0 # optional: current iteration, defaults to 0
+) {
+  # eliminate funky scientific notation problems for large-ish panel size
+  options(scipen=999)
+  
+  # mkdir output directory if it doesn't exist
+  mkdirs(odir)
+  
+  # define panel size & integer vf threshold
+  psize = gsub("\\.","pt",as.character(round(panel_size_mb,digits=2)))
+  vf = vfthresh*100
+  
+  # sample from tcga coding regions bed file
+  # intersect with master tcga call index to identify call sites sampled in this iteration
+  subbed = paste0(odir,"/regions_",psize,"mb_n",iter,"_vf",vf,".bed")
+  subidx = paste0(odir,"/regions_",psize,"mb_n",iter,"_vf",vf,".call_idx.txt")
+  cmd = paste0("shuf -n ",nlines," ",tfbed, " > ",subbed)
+  cmd = paste0(cmd,"; bedtools intersect -wa -a ",tpbed," -b ",subbed, " | uniq > ",subidx)
+  print(paste0("iteration - ",iter,"|| panel_size - ", panel_size_mb,"Mb\n",cmd))
+  system(cmd)
+  
+  # read in sampled call sites index
+  sampled_sites <- read_tsv(subidx,col_names=FALSE)
+  colnames(sampled_sites) <- c("Chromosome","Start_Position","End_Position","variant_id")
+  
+  # read in all TCGA calls at and above corresponding variant fraction threshold
+  tcgavf <- read_tsv(paste0(tcgacallsprefix,vf,".call_idx.txt")) %>%
+    mutate(variant_id = variant_id)
+  
+  # read in 'truth' mut counts/rates at corresponding variant fraction threshold
+  tcgatruth <- read_tsv(paste0(tcgacallsprefix,vf,".rate_tbl.txt"))
+  
+  # filter tcga master calls to those:
+  # 1) above variant fraction threshold
+  # 2) in genomic regions sampled
+  tcga_sub <- tcgadf %>%
+    left_join(tcgavf,by=c("Tumor_Sample_Barcode","variant_id")) %>%
+    filter(variant_id %in% unique(sampled_sites$variant_id))
+  
+  # calculate sampled ('in-panel') mut counts/rates
+  submuts <- as.data.frame(table(tcga_sub$Tumor_Sample_Barcode)) %>%
+    mutate(panel_mutmb = Freq/panel_size_mb,
+          panel_size = panel_size_mb,
+          iter_num = iter,
+          vfthresh=vf)
+          
+  colnames(submuts) <- c("Tumor_Sample_Barcode","panel_muts","panel_muts_mb","panel_size","iter_num","vfthresh")
+  
+  # merge with 'truth' set
+  submutsmerge <- submuts %>%
+    left_join(tcgatruth,by=c("Tumor_Sample_Barcode"))
+  
+  # parse tumor sample barcode -- retain patient id only
+  submuts2 <- cSplit(submutsmerge,
+                    splitCols = "Tumor_Sample_Barcode",
+                    sep="-",
+                    drop = FALSE)
+  submuts2$bcr_patient_barcode = paste(submuts2$Tumor_Sample_Barcode_1, submuts2$Tumor_Sample_Barcode_2, submuts2$Tumor_Sample_Barcode_3, sep="-")
+  
+  submutsout <- submuts2[,c("bcr_patient_barcode","wes_mut_count","wes_mut_mb","panel_muts","panel_muts_mb","panel_size","iter_num","vfthresh")]
+
+  remove(tcgatruth)
+  remove(tcgavf)
+  return(submutsout)
+}
+```
+
+```{r}
+if(FALSE) {
+# set list of panel_sizes
+panel_sizes = c(seq(0.1,1,0.1),1.5,2.0,seq(3,10,1))*1000000
+#panel_sizes = c(seq(.5,1.5,1))*1000000
+
+# number of times to sample regions of each panel_size
+niterations = 3
+
+# vf thresholds
+vfthresholds <- c(seq(0,0.25,0.05),0.5)
+
+# loop through list of panel_sizes, iterating pre-specified number of times
+for (i in 1:length(panel_sizes)) {
+  #i = 1
+  for (j in 1:niterations) {
+    #j = 1
+    for(k in 1:length(vfthresholds)) {
+      #k = 1
+      master_tbl = sampleTCGA(nlines=panel_sizes[i],iter=j,vfthresh=vfthresholds[k])
+      vf <- vfthresholds[k]*100
+      psize = gsub("\\.","pt",as.character(round(master_tbl[1,"panel_size"],digits=2)))
+      data_file = paste0("/mnt/hgfs/danhovelson/analysis/tmb/tmp/regions_",psize,"mb_n",j,"_vf",vf,".data_tbl.txt")
+      write_tsv(master_tbl,path=data_file)
+      remove(master_tbl)
+    }
+  }
+}
+}
+```
+
+```{r process TCGA sampling data}
+l <- list.files("/mnt/hgfs/danhovelson/analysis/tmb/tmp",full.names = TRUE,pattern = "data_tbl")
+if (FALSE) {
+  for (i in 1:length(l)) {
+  print(paste0("i = ",i))
+  if (i == 1) {
+    master_mut <- read_tsv(l[i])
+  } else {
+    tmut <- read_tsv(l[i])
+    master_mut <- rbind(master_mut,tmut)
+  }
+}
+}
+# write out master experiment mut count & rate table
+#write_tsv(master_mut,"/mnt/hgfs/danhovelson/analysis/tmb/20180601.tcga.wes_vs_panel.mut_count_rates.txt")
+master_mut_sum <- master_mut %>%
+  group_by(bcr_patient_barcode,panel_size,vfthresh) %>%
+  summarise(wes_count = mean(wes_mut_count),
+            wes_rate = mean(wes_mut_mb),
+            panel_count = mean(panel_muts),
+            panel_rate = mean(panel_muts_mb),
+            panel_rate_sd=sd(panel_muts_mb)) %>%
+  # filter out high sd in panel_rate calculations
+  filter(panel_rate_sd < 5)
+
+# grab full variant set data ('vfthresh == 0')
+vf0df <- master_mut_sum %>%
+  filter(vfthresh == 0) %>%
+  ungroup() %>%
+  select(bcr_patient_barcode,"wes_count_truth"=wes_count,"wes_rate_truth"=wes_rate) %>%
+  unique() %>%
+  mutate(rate_group = cut(wes_rate_truth,c(0,10,20,40,100,10000)))
+
+# merge 'truth' in with sampled data
+vf0df %>%
+  left_join(master_mut_sum,by=c("bcr_patient_barcode")) %>%
+  group_by(panel_size,vfthresh,rate_group) %>%
+  mutate(rsq = cor(wes_rate_truth,panel_rate)**2) %>%
+  select(panel_size,vfthresh,rate_group,rsq) %>%
+  unique() -> master_mut_sum2
+
+# check r-squared (panel vs truth) across panel_size/vf groupings
+ggplot(master_mut_sum2[master_mut_sum2$panel_size < 5,],aes(panel_size,rsq,color=vfthresh,group=vfthresh)) + 
+  theme_bw() +
+  geom_line() +
+  facet_grid(rate_group~.) +
+  ggtitle("Correlation w/'Truth' WES Mut Rate")
+
+# check individual sample level data
+master_mut_sum3 <- master_mut_sum %>%
+  left_join(vf0df,by=c("bcr_patient_barcode"))
+
+master_mut_sum3 %>%
+  filter(wes_rate_truth >= 10 & wes_rate_truth <= 100 & panel_size %in% c(0.5,1.5,2,3,4,5)) %>%
+  ggplot(aes(wes_rate_truth,panel_rate)) + geom_point() +
+  geom_smooth(method="lm",color="red") + 
+  scale_x_log10() +
+  scale_y_log10() +
+  facet_grid(panel_size~vfthresh) +
+  ggtitle("Sample-Level Correlation btw WES & Panel rate: By Panel Size/VF Threshold")
+
+```
+
+```{r "check deviation from regression line for outlier samples"}
+master_mut_sum3 %>%
+  filter(wes_rate_truth >= 10 & wes_rate_truth <= 100 & panel_size %in% c(5) & vfthresh == 0) -> tmp3
+
+lmtest <- lm(formula=tmp3$wes_rate_truth~tmp3$panel_rate,df=df)
+t <- resid(lmtest)
+
+mydf <- data.frame("wes_truth" = tmp3$wes_rate_truth,"panel_rate"=tmp3$panel_rate,
+                  "rate_group"=tmp3$rate_group,
+                  "bcr_patient_barcode"=tmp3$bcr_patient_barcode,
+                  "resid"=resid(lmtest))
+
+b <- mydf[mydf$resid < -15,c("bcr_patient_barcode")]
+
+mydf %>%
+  ggplot(aes(wes_truth,panel_rate)) + geom_point(aes(color=resid)) +
+  #geom_smooth(method="lm",color="red") + 
+  #scale_x_log10() +
+  #scale_y_log10() +
+  #facet_grid(panel_size~vfthresh) +
+ggtitle("Sample-Level Correlation btw WES & Panel rate: By Panel Size/VF Threshold")
+
+# check outlier samples
 ```
 
