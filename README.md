@@ -4,6 +4,6 @@ Readme file for TMB analysis.
 
 **test repo for git activity**
 
--check in analyses as they proceed
+-check in analyses as they progress
 
 
