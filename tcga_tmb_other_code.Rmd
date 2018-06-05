@@ -1,0 +1,96 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+
+
+
+```{r eval=FALSE}
+# read in sample index
+tcga_samps <- read_csv("/mnt/hgfs/danhovelson/analysis/tmb/tcga_sample_table.csv")
+
+# combine exome/tcga muts (quartiles)
+compcalls <- exomemuts %>%
+  left_join(tmlmuts,by=c("Var1","Var2")) %>%
+  mutate(cat = "deciles")
+colnames(compcalls) = c("Tumor_Sample_Barcode","VFgroup","ExomeMuts","TMLMuts","Cat")
+
+# combine exome/tcga muts (10% threshold)
+compcalls1 <- exomemuts1 %>%
+  left_join(tmlmuts1,by=c("Var1","Var2"))  %>%
+  mutate(cat = "pct10")
+colnames(compcalls1) = c("Tumor_Sample_Barcode","VFgroup","ExomeMuts","TMLMuts","Cat")
+
+# combine exome/tcga muts (15% threshold)
+compcalls2 <- exomemuts2 %>%
+  left_join(tmlmuts2,by=c("Var1","Var2"))  %>%
+  mutate(cat = "pct15")
+colnames(compcalls2) = c("Tumor_Sample_Barcode","VFgroup","ExomeMuts","TMLMuts","Cat")
+
+compcalls_ = rbind(compcalls,compcalls1,compcalls2)
+
+compcallsout <- cSplit(compcalls_,
+                    splitCols = "Tumor_Sample_Barcode",
+                    sep="-",
+                    drop = FALSE)
+
+# parse tumor specimen barcode - retain sample barcode only
+compcallsout$bcr_patient_barcode = paste(compcallsout$Tumor_Sample_Barcode_1,compcallsout$Tumor_Sample_Barcode_2,compcallsout$Tumor_Sample_Barcode_3,sep="-")
+```
+
+```{r fig1, fig.height = 11, fig.width = 9}
+# Plot comparison to TCGA (all WES mutation calls)
+# calculate muts/mb
+compcallsfin <- compcallsout %>%
+  select(bcr_patient_barcode,Tumor_Sample_Barcode,VFgroup,ExomeMuts,TMLMuts,Cat) %>%
+  left_join(tcga_samps,by=c("bcr_patient_barcode")) %>%
+  mutate(TMLMuts2 = ifelse(is.na(TMLMuts),0.1,TMLMuts)) %>%
+  mutate(TMLmb = TMLMuts2/1.5,Exomemb=ExomeMuts/30)
+
+# TCGA: mut count comparison
+ggplot(compcallsfin[compcallsfin$TMLMuts2 > 0.1,],aes(Exomemb,TMLmb,color=type)) + 
+  theme_bw() +
+  geom_point(aes(color=type),shape=21,size=1) +
+  geom_smooth(method="lm",color="red") +
+  scale_y_log10("WES Coding Muts/Mb in TML Regions (by Variant Fraction)",breaks=c(0.1,1,10,100,1000),label=comma) +
+  scale_x_log10("All WES Coding Muts/Mb",breaks=c(0.1,1,10,100,1000),label=comma) +
+  facet_wrap(~VFgroup) +
+  ggtitle("TCGA Variant Calls: WES vs TML Regions\n[n=9,561 TCGA Samples w/ 1+ Variant in TML regions]") +
+  theme(legend.position="bottom") 
+```
+
+```{r fig2, fig.height = 5, fig.width = 7}
+# Plot TCGA (VF >10% / >15%)
+compcallsthresh <- compcallsfin[compcallsfin$VFgroup %in% c("(0.1,1]","(0.15,1]") & compcallsfin$ExomeMuts > 0 & !is.na(compcallsfin$type),]
+
+# TCGA: mut count comparison
+ggplot(compcallsthresh, aes(Exomemb,TMLmb,color=type)) + 
+  theme_bw() +
+  geom_point(aes(color=type),shape=21,size=1) +
+  geom_smooth(method="lm",color="red") +
+  scale_y_log10("WES Coding Muts/Mb in TML Regions (by Variant Fraction)",breaks=c(0.1,1,10,100,1000),label=comma) +
+  scale_x_log10("All WES Coding Muts/Mb",breaks=c(0.1,1,10,100,1000),label=comma) +
+  facet_wrap(~VFgroup) +
+  ggtitle("TCGA Variant Calls: WES vs TML Regions\n[n=9,561 TCGA Samples w/ 1+ Variant in TML regions]") +
+  theme(legend.position="bottom")
+
+# correlations
+cor(compcallsthresh[compcallsthresh$VFgroup %in% c("(0.1,1]"),]$Exomemb,
+     compcallsthresh[compcallsthresh$VFgroup %in% c("(0.1,1]"),]$TMLmb)
+
+cor(compcallsthresh[compcallsthresh$VFgroup %in% c("(0.15,1]"),]$Exomemb,
+     compcallsthresh[compcallsthresh$VFgroup %in% c("(0.15,1]"),]$TMLmb)
+
+```
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
