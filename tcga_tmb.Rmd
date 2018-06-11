@@ -3,7 +3,13 @@ title: "TMB TCGA analysis"
 output:
   html_document:
     df_print: paged
+  html_notebook:
+    df_print: paged
 ---
+
+```{r global_options}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
 
 ```{r}
 # TMB TCGA check
@@ -19,131 +25,18 @@ library(cutpointr)
 #setwd("/mnt/hgfs/danhovelson/Box Sync/Strata/")
 ```
 
-```{r load tcga file}
-# keep coding variation only
-#tcga <- tcgaraw[!tcgaraw$Variant_Classification %in% #c("Intron","3'Flank","3'UTR","5'Flank","5'UTR","RNA","Splice_Site","Translation_Start_Site"),]
-#save(tcga,file="../../analysis/tmb/20180525.tcga_pancx_coding_variants.rda")
-#load("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.rda")
-
-# Keep subset of columns to reduce memory impact
-
-#tcgatrim = tcga[,c("Chromosome","Start_Position","End_Position","Hugo_Symbol","Reference_Allele","Tumor_Seq_Allele1","Tumor_Seq_Allele2","Variant_Type","Variant_Classification","Consequence","Feature_type","VARIANT_CLASS","Tumor_Sample_Barcode","t_depth","t_ref_count","t_alt_count")]
-#save(tcgatrim,file="/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.trim_cols.rda")
-
-# only re-load if needed
-#if(FALSE) {
-  load(file="/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.trim_cols.rda")
-#}
-```
-
-```{r process tcga data}
-tcga_ = tcgatrim
-
-# set variant_id variable for full tcga coding variant index
-tcgavid <- read_tsv("/mnt/hgfs/danhovelson/analysis/bed/20180525.tcga_pancx_coding_variants.pos_idx.chr.bed",col_names = FALSE)
-colnames(tcgavid) <- c("Chromosome","Start_Position","End_Position","variant_id")
-tcgavid %>%
-  mutate(variant_hash = paste(gsub("chr","",Chromosome),Start_Position,End_Position,sep=";")) %>%
-  select(variant_hash, variant_id) -> tcgavid2
-remove(tcgavid)
-
-# match index variable to detailed tcga calls df
-tcga <- tcga_ %>%
-  mutate(variant_hash = paste(Chromosome,Start_Position,End_Position,sep=";")) %>%
-  left_join(tcgavid2,by=c("variant_hash"))
-remove(tcga_)
-
-# calculate variant_fraction & create categories/thresholds
-tcga$VF <- tcga$t_alt_count / tcga$t_depth
-tcga$VFcat <- cut(tcga$VF,c(seq(0,1.0,0.25)),include.lowest=TRUE)
-tcga$VFthresh1 <- cut(tcga$VF,c(0,0.1,1.0),include.lowest=TRUE)
-tcga$VFthresh2 <- cut(tcga$VF,c(0,0.15,1.0),include.lowest=TRUE)
-```
-```{r TCGA VF by depth, eval=FALSE}
-# load total tcga df
-#load("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.trim_cols.rda")
-
-# calculate tcga vf and depth categories
-tcgatrim$vf <- tcgatrim$t_alt_count/tcgatrim$t_depth
-tcgatrim$vfcat <- cut(tcgatrim$vf,c(seq(0,0.5,0.1),1.0),include.lowest=TRUE)
-tcgatrim$depthcat <- cut(tcgatrim$t_depth,c(0,20,30,40,50,100,1000,1000000),include.lowest=TRUE)
-
-# check vf vs. depth relationship
-ggplot(tcgatrim[tcgatrim$Chromosome %in% c(1),],aes(vf,t_depth)) + geom_point(alpha=0.1) + scale_y_log10()
-ggplot(tcgatrim,aes(vfcat)) + geom_bar(aes(fill=depthcat))
-
-# read in tcga truth mut rate (WES-based)
-tcgatruth <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.wes_muts.gt_vf0.rate_tbl.txt")
-
-# check effects of vf/coverage on mut rate calculation
-# ex: vf > 20%
-tcgafilter <- tcgatrim %>% filter(vf > 0.2)
-tfiltmut <- as.data.frame(table(tcgafilter$Tumor_Sample_Barcode))
-colnames(tfiltmut) <- c("Tumor_Sample_Barcode","filt_mut_count")
-tfiltmut$filt_mut_mb <- tfiltmut$filt_mut_count/30
-tcgatruth %>% left_join(tfiltmut,by=c("Tumor_Sample_Barcode")) %>% ggplot(aes(filt_mut_mb,wes_mut_mb)) + geom_point() + ggtitle("VF > 20%")
-
-# ex: coverage > 50
-tcgafilter <- tcgatrim %>% filter(t_depth > 50)
-tfiltmut <- as.data.frame(table(tcgafilter$Tumor_Sample_Barcode))
-colnames(tfiltmut) <- c("Tumor_Sample_Barcode","filt_mut_count")
-tfiltmut$filt_mut_mb <- tfiltmut$filt_mut_count/30
-tcgatruth %>% left_join(tfiltmut,by=c("Tumor_Sample_Barcode")) %>% ggplot(aes(filt_mut_mb,wes_mut_mb)) + geom_point() + ggtitle("TotalDepth > 50")
-```
-
-```{r TCGA calls in TML regions}
-# ingest tcga-in-TML index, update to correct variant_id
-tcga_tml_idx_ <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.IN_TML.uniq.bed",col_names = FALSE)
-colnames(tcga_tml_idx_) <- c("Chromosome","Start_Position","End_Position","old_variant_id")
-tcga_tml_idx_ %>%
-  mutate(variant_hash = paste(gsub("chr","",Chromosome),Start_Position,End_Position,sep=";")) %>%
-  left_join(tcgavid2,by=c("variant_hash")) %>%
-  select(-old_variant_id,-variant_hash) -> tcga_tml_idx
-
-# filter TCGA calls to those in all TML regions
-tcga_tml <- tcga %>%
-  filter(variant_id %in% unique(tcga_tml_idx$variant_id)) 
-
-## check pool 1 vs pool 2 vs all
-tcga_tml_pool1_idx <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.IN_TML_pool1.bed",col_names = FALSE)
-colnames(tcga_tml_pool1_idx) <- c("Chromosome","Start_Position","End_Position","j1")
-tcga_tml_pool1_idx$pool1 <- "yes"
-tcga_tml_pool1_idx %>%
-  mutate(variant_hash = paste(gsub("chr","",Chromosome),Start_Position,End_Position,sep=";")) %>%
-  select(variant_hash,pool1) %>%
-  unique() -> ttmlpool1
-
-tcga_tml_pool2_idx <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.IN_TML_pool2.bed",col_names = FALSE)
-colnames(tcga_tml_pool2_idx) <- c("Chromosome","Start_Position","End_Position","j1")
-tcga_tml_pool2_idx$pool2 <- "yes"
-tcga_tml_pool2_idx %>%
-  mutate(variant_hash = paste(gsub("chr","",Chromosome),Start_Position,End_Position,sep=";")) %>%
-  select(variant_hash, pool2) %>%
-  unique() -> ttmlpool2
-
-# annotate variants as in pool 1, 2, or both
-tcga_tml %>%
-  left_join(ttmlpool1,by=c("variant_hash")) %>%
-  left_join(ttmlpool2,by=c("variant_hash")) %>%
-  mutate(pool=ifelse(pool1 %in% c("yes") & pool2 %in% c("yes"),"both",
-                     ifelse(pool1 %in% c("yes"),"pool1","pool2"))) %>%
-  select(-pool1,-pool2) -> tcga_tml2
-
-# 'truth' rates
-tcga_truth <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.wes_muts.gt_vf0.rate_tbl.txt")
-
-```
-```{r TML sampling function}
+```{r TML sampling function, echo=FALSE}
 # sampleTCGAtml function: Explore TCGA concordance for a given panel size
 # 1) subset tcga calls to those at or above specific VF threshold 
 # 3) calculate muts/mb and correlate with WES muts/mb and return
 sampleTCGAtml = function(tcgadf = tcga_tml2, # tcga variants data frame
                 odir = "/mnt/hgfs/danhovelson/analysis/tmb/tml", # output directory
                 vfthresh = 0, # min variant fraction threshold
-                tcgacallsprefix = "/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.wes_muts.gt_vf", # file prefix for tcga VF-filtered calls
-                truth = "/mnt/hgfs/danhovelson/analysis/tmb/20180525.tcga_pancx_coding_variants.wes_muts.gt_vf0.rate_tbl.txt", # truth (WES) rates
+                vdepthresh = 5, # min variant supporting read count threshold
+                tcgacallsprefix = "/mnt/hgfs/danhovelson/analysis/tmb/tcga_sets/20180525.tcga_pancx_coding_variants.wes_muts.gt_vf", # file prefix for tcga VF-filtered calls
+                truth = "/mnt/hgfs/danhovelson/analysis/tmb/tcga_sets/20180525.tcga_pancx_coding_variants.wes_muts.gt_vf0_vdp5.rate_tbl.txt", # truth (WES) rates
                 panel_size_mb = 0, # default to 0, this is specific to what portion of TML panel or subset is used
-                coverage = 0, # min TCGA coverage
+                coverage = 0, # theoretical coverage of TML sequencing
                 iter = 0 # optional: current iteration, defaults to 0
 ) {
   # eliminate funky scientific notation problems for large-ish panel size
@@ -155,42 +48,45 @@ sampleTCGAtml = function(tcgadf = tcga_tml2, # tcga variants data frame
   # define panel size & integer vf threshold
   psize = gsub("\\.","pt",as.character(round(panel_size_mb,digits=2)))
   vf = vfthresh*100
+  cov = coverage
   
-  # read in 'truth' mut counts/rates
-  tcgatruth <- read_tsv(truth)
+  # read in WES 'truth' mut counts/rates
+  tcgatruth <- read_tsv(truth) 
   
-  # filter tcga_tml calls to those:
+  # read in WES VF-threshold rates (specify if rates calculated with min var depth threshold / tml depth threshold)
+  if (vdepthresh == 5 & cov == 0) {
+    tcgathresh <- read_tsv(paste0(tcgacallsprefix,vf,"_vdp",vdepthresh,".rate_tbl.txt"))
+    tcgaregcalls <- read_tsv(paste0(tcgacallsprefix,vf,"_vdp",vdepthresh,".call_idx.txt"))
+  } else {
+    tcgathresh <- read_tsv(paste0(tcgacallsprefix,vf,"_cov",cov,"_vdp",vdepthresh,".rate_tbl.txt"))
+    tcgaregcalls <- read_tsv(paste0(tcgacallsprefix,vf,"_cov",cov,"_vdp",vdepthresh,".call_idx.txt"))
+  }
+  colnames(tcgathresh) <- c("Tumor_Sample_Barcode","wes_sample_mut_count","wes_sample_mut_mb")
+  colnames(tcgaregcalls) <- c("Tumor_Sample_Barcode","variant_id")
+  
+  # key!! --> filter tcga_tml calls to those:
   # 1) above variant fraction threshold
+  # 2) above min variant supporting read threshold
+  # 3) 'callable' at specified downsampled coverage (so, sample barcode + variant_id must be in 'tcgaregcalls')
   tcga_sub <- tcgadf %>%
-    filter(VF > vfthresh & t_depth > coverage)
+    filter(VF > vfthresh & t_alt_count >= vdepthresh) %>%
+    inner_join(tcgaregcalls,by=c("Tumor_Sample_Barcode","variant_id"))
+  remove(tcgaregcalls)
   
   ##### overall TML panel
   # calculate sampled ('in-panel') mut counts/rates
   submuts <- as.data.frame(table(tcga_sub$Tumor_Sample_Barcode)) %>%
-    mutate(panel_mutmb = Freq/1.7,
-          panel_size = 1.7,
+    mutate(panel_mutmb = Freq/1.215,
+          panel_size = 1.215,
           iter_num = iter,
           vfthresh=vf,
-          coverage=coverage,
+          coverage=cov,
           group="overall")
   colnames(submuts) <- c("Tumor_Sample_Barcode","panel_muts","panel_muts_mb","panel_size","iter_num","vfthresh","coverage","group")
   
-  # merge with 'truth' set
-  submutsmerge <- submuts %>%
-    left_join(tcgatruth,by=c("Tumor_Sample_Barcode"))
-  
-  # parse tumor sample barcode -- retain patient id only
-  submuts2 <- cSplit(submutsmerge,
-                    splitCols = "Tumor_Sample_Barcode",
-                    sep="-",
-                    drop = FALSE)
-  submuts2$bcr_patient_barcode = paste(submuts2$Tumor_Sample_Barcode_1, submuts2$Tumor_Sample_Barcode_2, submuts2$Tumor_Sample_Barcode_3, sep="-")
-  submutsout <- submuts2[,c("bcr_patient_barcode","wes_mut_count","wes_mut_mb","panel_muts","panel_muts_mb","panel_size","iter_num","vfthresh","coverage","group")]
-
-  
   ##### totals: by pool
   ### TML subset sizes (in Mbp)
-  poolsize = as.data.frame(matrix(c("both",0.044,"pool1",0.852,"pool2",0.848),ncol=2,byrow=TRUE),stringsAsFactors=FALSE)
+  poolsize = as.data.frame(matrix(c("both",0.043,"pool1",0.626,"pool2",0.631),ncol=2,byrow=TRUE),stringsAsFactors=FALSE)
   colnames(poolsize) = c("Var2","panel_size_mb")
   poolsize$panel_size_mb <- as.numeric(poolsize$panel_size_mb)
   
@@ -200,101 +96,159 @@ sampleTCGAtml = function(tcgadf = tcga_tml2, # tcga variants data frame
     mutate(panel_mutmb = Freq/panel_size_mb,
           iter_num = iter,
           vfthresh=vf,
-          coverage=coverage)
+          coverage=cov)
   colnames(submutsp) <- c("Tumor_Sample_Barcode","group","panel_muts","panel_size","panel_muts_mb","iter_num","vfthresh","coverage")
   
+  # concatenate TML subset rates
+  submutscom <- rbind(submuts,submutsp)
+  
   # merge with 'truth' set
-  submutsmergep <- submutsp %>%
+  submutsmerge <- submutscom %>%
     left_join(tcgatruth,by=c("Tumor_Sample_Barcode"))
   
+  # merge with vf-sampled 'truth' set
+  submutsmerge2 <- submutsmerge %>%
+    left_join(tcgathresh,by=c("Tumor_Sample_Barcode"))
+  
   # parse tumor sample barcode -- retain patient id only
-  submuts2p <- cSplit(submutsmergep,
+  submuts2 <- cSplit(submutsmerge2,
                     splitCols = "Tumor_Sample_Barcode",
                     sep="-",
                     drop = FALSE)
-  submuts2p$bcr_patient_barcode = paste(submuts2p$Tumor_Sample_Barcode_1, submuts2p$Tumor_Sample_Barcode_2, submuts2p$Tumor_Sample_Barcode_3, sep="-")
-  submutsoutp <- submuts2p[,c("bcr_patient_barcode","wes_mut_count","wes_mut_mb","panel_muts","panel_muts_mb","panel_size","iter_num","vfthresh","coverage","group")]
-  
-  # cat overall and group totals
-  submutsoutfin <- rbind(submutsout,submutsoutp)
-  
+  submuts2$bcr_patient_barcode = paste(submuts2$Tumor_Sample_Barcode_1, submuts2$Tumor_Sample_Barcode_2, submuts2$Tumor_Sample_Barcode_3, sep="-")
+  submutsout <- submuts2[,c("bcr_patient_barcode","wes_mut_count","wes_mut_mb","wes_sample_mut_count","wes_sample_mut_mb","panel_muts","panel_muts_mb","panel_size","iter_num","vfthresh","coverage","group")]
+
   remove(tcgatruth)
-  return(submutsoutfin)
+  return(submutsout)
 }
 ```
 
 
-```{r sample TCGA calls in TML regions across variable VFs}
-# overall plot
-tml <- sampleTCGAtml()
-ggplot(tml,aes(panel_muts_mb,wes_mut_mb,color=group)) + 
+```{r ingest tcga-in-tml df and variant index, message=FALSE, warnings=FALSE}
+# read in TCGA-in-TML (tcga_tml2) df
+tcga_tml2 <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/tcga_parsed_df.for_analysis.in_tml_regions.txt")
+# read in TCGA-in-TML (tcgavid2) variant index
+tcgavid2 <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/tcga_parsed_df.for_analysis.var_index.txt")
+
+# grab total (truth) breakdowns with no coverage or VF threshold
+tml <- sampleTCGAtml() %>% 
+  filter(group %in% c("pool1","pool2","overall"))
+
+# plot tml panel vs 'truth' rates, stratified by coverage and panel group
+ggplot(tml,aes(panel_muts_mb,wes_sample_mut_mb,color=group)) + 
   theme_bw() +
-  geom_point() + 
-  facet_wrap(~group,scales="free") +
+  geom_point(alpha=0.01) + 
+  facet_wrap(coverage~group,scales="free") +
   scale_color_brewer("Pool_Coverage",palette="Set1") +
   scale_y_log10() +
   scale_x_log10() +
   ggtitle("TCGA Mutation Load Across TML Target Regions")
+```
 
+```{r sample TCGA calls in TML regions across variable VFs and coverages, message=FALSE, warnings=FALSE, eval=FALSE}
 # vf thresholds
-vfthresholds <- c(seq(0,0.25,0.05),0.5)
+vfthresholds <- c(seq(0,0.5,0.05))
 
-# loop through list of panel_sizes, iterating pre-specified number of times
-for(k in 1:length(vfthresholds)) {
-  #k = 1
-  vf <- vfthresholds[k]*100
-  #data_file = paste0("/mnt/hgfs/danhovelson/analysis/tmb/tml/TML_regions_vf",vf,".data_tbl.txt")
-  #write_tsv(master_tbl,path=data_file)
-  if (k == 1) {
-    master_tbl = sampleTCGAtml(vfthresh=vfthresholds[k])
-  } else {
-    tmaster = sampleTCGAtml(vfthresh=vfthresholds[k])
-    master_tbl = rbind(master_tbl,tmaster)
+# loop through list of coverages
+covs <- c(0,50,100,200,500)
+
+# sample TCGA-in-TML data across VF & coverage combinations
+for (c in 1:length(covs)) {
+  # grab sampled data at specified coverage
+  cov_ = covs[c]
+
+  for(k in 1:length(vfthresholds)) {
+    if (k == 1 & c == 1) {
+      master_tbl = sampleTCGAtml(vfthresh=vfthresholds[k],coverage=cov_)
+    } else {
+      tmaster = sampleTCGAtml(vfthresh=vfthresholds[k],coverage=cov_)
+      master_tbl = rbind(master_tbl,tmaster)
+    }
   }
 }
+# write table to file and save R object for downstream analysis
+write_tsv(master_tbl,"/mnt/hgfs/danhovelson/analysis/tmb/results/20180608.vf_coverage_mut_rates.txt")
+save(master_tbl,file="/mnt/hgfs/danhovelson/analysis/tmb/results/20180608.vf_coverage_mut_rates.rda")
+```
 
-# calculate r-squared
+```{r read in stored results of sampling experiment and calculate stats}
+# load vf/coverage mut rates obj
+load("/mnt/hgfs/danhovelson/analysis/tmb/results/20180608.vf_coverage_mut_rates.rda")
+
+# for each coverage/VF/panel_subset/mut_rate_group, calculate correlation & r-squared 
 master_tbl %>%
-  mutate(rate_group = cut(wes_mut_mb,c(0,10,20,40,100,10000))) %>%
-  group_by(group,vfthresh,rate_group) %>%
-  mutate(rsq = cor(wes_mut_mb,panel_muts_mb)**2) -> master_tbl_r
+  filter(group %in% c("pool1","pool2","overall")) %>%
+  mutate(rate_group = cut(wes_sample_mut_mb,c(0,10,30,10000))) %>%
+  group_by(group,vfthresh,rate_group,coverage) %>%
+  mutate(ratecor = cor(wes_sample_mut_mb,panel_muts_mb),
+        rsq = ratecor**2) -> master_tbl_r
+#,      modrsq = summary(lm(wes_sample_mut_mb~panel_muts_mb))$r.squared) -> master_tbl_r
 
-rsqdf <- unique(master_tbl_r[,c("rate_group","group","rsq","vfthresh")])
-
-# rsquared plot
-ggplot(rsqdf,aes(vfthresh,rsq,color=rate_group)) + 
-  theme_bw() +
-  geom_line() +
-  scale_color_brewer("WES Mut Rate (per mb)",palette="Set2") +
-  scale_y_continuous("R^2 Value") +
-  scale_x_continuous("VF Threshold") +
-  facet_grid(group~.) +
-  ggtitle("R^2 vs VF Threshold (By WES Mut Rate)")
-
-# mut load by vf threshold
-ggplot(master_tbl_r,aes(panel_muts_mb,wes_mut_mb)) +
-  theme_bw() +
-  geom_point(alpha=0.01) +
-  geom_smooth(method="lm",color="red") +
-  scale_y_continuous("WES Mut Rate (per mb)") +
-  scale_x_continuous("TML Subset Mut Rate (per mb)") +
-  #scale_color_brewer("WES Mut Rate (per mb)",palette="Set2") +
-  facet_wrap(group~rate_group,scales="free") +
-  ggtitle("Mutation Load By Variant Fraction Threshold")
+rsqdf <- unique(master_tbl_r[,c("rate_group","group","coverage","rsq","ratecor","vfthresh")])
 
 ```
-```{r evaluate sensitivity/specificity}
+
+```{r analyze sampled TCGA calls, fig.height = 12, fig.width = 8, fig.align = "center", cache=TRUE, message = FALSE}
+
+# mut load by panel_subset (vfthresh == 0)
+master_tbl_r %>%
+  filter(vfthresh == 0 & group == "overall") %>%
+  ggplot(aes(panel_muts_mb,wes_sample_mut_mb)) +
+  theme_bw() +
+  geom_point(alpha=0.05) +
+  geom_smooth(method="lm",color="red") +
+  scale_y_continuous("WES Sampled 'Truth' Rate (per mb)") +
+  scale_x_continuous("TML Predicted Mut Rate (per mb)") +
+  #scale_color_brewer("WES Mut Rate (per mb)",palette="Set2") +
+  facet_wrap(coverage~rate_group,scales="free",ncol=length(unique(master_tbl_r$rate_group))) +
+  ggtitle("Mutation Load By Coverage")
+
+# mut load by vf threshold (overall)
+master_tbl_r %>%
+  filter(group == "overall" & coverage == 0 & vfthresh %% 10 == 0) %>%
+  ggplot(aes(panel_muts_mb,wes_sample_mut_mb)) +
+  theme_bw() +
+  geom_point(alpha=0.05) +
+  geom_smooth(method="lm",color="red") +
+  scale_y_continuous("WES Truth Mut Rate (per mb)") +
+  scale_x_continuous("TML Predicted Mut Rate (per mb)") +
+  #scale_color_brewer("WES Mut Rate (per mb)",palette="Set2") +
+  facet_wrap(vfthresh~rate_group,scales="free",ncol=length(unique(master_tbl_r$rate_group))) +
+  ggtitle("Mutation Load By VF Threshold")
+
+```
+
+```{r deviation from expected}
 # sens/spec calculations
 master_tbl_r %>%
-  mutate(rate_group_panel = cut(panel_muts_mb,c(0,10,20,40,100,10000))) -> master_tbl_r2
+  mutate(rate_group_panel = cut(panel_muts_mb,c(0,10,30,10000))) -> master_tbl_r2
 
-# rate groups, vf thresh, and panel subsets
+# calculate deviation from expected
+master_tbl_r2$dev_samp <- master_tbl_r2$panel_muts_mb/master_tbl_r2$wes_sample_mut_mb
+master_tbl_r2$dev_truth <- master_tbl_r2$panel_muts_mb/master_tbl_r2$wes_mut_mb
+
+if(FALSE) {
+  master_tbl_r2 %>%
+  filter(vfthresh %% 10 ==0) %>%
+  ggplot(aes(dev_samp,dev_truth)) +
+  theme_bw() +
+  geom_bin2d() +
+  scale_fill_continuous(low="blue",high="red") +
+  scale_x_log10() +
+  scale_y_log10() +
+  facet_grid(coverage~vfthresh+group)
+}
+```
+
+```{r evaluate sensitivity/specificity, fig.height = 6, fig.width = 8, fig.align = "center"}
+# rate groups, vf thresh, panel subsets, and coverages
 tgrps <- unique(master_tbl_r2$rate_group)
 vgrps <- unique(master_tbl_r2$vfthresh)
 pgrps <- unique(master_tbl_r2$group)
+cgrps <- unique(master_tbl_r2$coverage)
 
 # empty df for sens/spec results
-for(i in 1:length(tgroups)) {
+for(i in 1:length(tgrps)) {
   #i = 1
   cgrp <- as.character(tgrps[i])
   for(j in 1:length(pgrps)) {
@@ -302,48 +256,74 @@ for(i in 1:length(tgroups)) {
     for(k in 1:length(vgrps)) {
    #   j = 1
       cv = vgrps[k]
-      t <- master_tbl_r2[master_tbl_r2$vfthresh %in% cv & master_tbl_r2$group %in% pgrp,]
-      t$ng <- factor(if_else(t$rate_group %in% c(cgrp),"in","out"),levels=c("in","out"))
-      t$npg <- factor(if_else(t$rate_group_panel %in% c(cgrp),"in","out"),levels=c("in","out"))
-      tbl <- as.data.frame(table(t$ng,t$npg))
-      
-      # calculate relevant values for sens/spec calcs
-      tp <- tbl[tbl$Var1 == "in" & tbl$Var2 == "in",]$Freq
-      tn <- tbl[tbl$Var1 == "out" & tbl$Var2 == "out",]$Freq
-      fp <- tbl[tbl$Var1 == "out" & tbl$Var2 == "in",]$Freq
-      fn <- tbl[tbl$Var1 == "in" & tbl$Var2 == "out",]$Freq
-      sens = sensitivity(tp,fn)
-      spec = specificity(fp,tn)
-      tot_samps = sum(tp,tn,fp,fn)
-      if (i == 1 & j == 1) {
-        ssout <- as.data.frame(matrix(c(cv,cgrp,tp,tn,fp,fn,tot_samps,sens,spec,pgrp),nrow=1,byrow=TRUE),stringsAsFactors=FALSE)
-        colnames(ssout) <- c("VF","truth_rate","tp","tn","fp","fn","tot_samps","sens","spec","panel_subset")
-      } else {
-          tssout <- as.data.frame(matrix(c(cv,cgrp,tp,tn,fp,fn,tot_samps,sens,spec,pgrp),nrow=1,byrow=TRUE),stringsAsFactors=FALSE)
-          colnames(tssout) <- c("VF","truth_rate","tp","tn","fp","fn","tot_samps","sens","spec","panel_subset")
-          ssout <- rbind(ssout,tssout)
+      for(l in 1:length(cgrps)) {
+        covthresh = cgrps[l]
+        t <- master_tbl_r2[master_tbl_r2$vfthresh %in% cv & master_tbl_r2$group %in% pgrp & master_tbl_r2$coverage %in% c(covthresh),]
+        t$ng <- factor(if_else(t$rate_group %in% c(cgrp),"in","out"),levels=c("in","out"))
+        t$npg <- factor(if_else(t$rate_group_panel %in% c(cgrp),"in","out"),levels=c("in","out"))
+        tbl <- as.data.frame(table(t$ng,t$npg))
+        
+        # grab relevant values for sens/spec calcs
+        tp <- tbl[tbl$Var1 == "in" & tbl$Var2 == "in",]$Freq
+        tn <- tbl[tbl$Var1 == "out" & tbl$Var2 == "out",]$Freq
+        fp <- tbl[tbl$Var1 == "out" & tbl$Var2 == "in",]$Freq
+        fn <- tbl[tbl$Var1 == "in" & tbl$Var2 == "out",]$Freq
+        sens = sensitivity(tp,fn)
+        spec = specificity(fp,tn)
+        tpr = tpr(tp,fn)
+        fpr = tpr(fp,tn)
+        tot_samps = sum(tp,tn,fp,fn)
+        if (i == 1 & j == 1 & k == 1 & l == 1) {
+          ssout <- as.data.frame(matrix(c(cv,cgrp,tp,tn,fp,fn,tot_samps,sens,spec,tpr,fpr,pgrp,covthresh),nrow=1,byrow=TRUE),stringsAsFactors=FALSE)
+          colnames(ssout) <- c("VF","truth_rate","tp","tn","fp","fn","tot_samps","sens","spec","tpr","fpr","panel_subset","coverage")
+        } else {""
+            tssout <- as.data.frame(matrix(c(cv,cgrp,tp,tn,fp,fn,tot_samps,sens,spec,tpr,fpr,pgrp,covthresh),nrow=1,byrow=TRUE),stringsAsFactors=FALSE)
+            colnames(tssout) <- c("VF","truth_rate","tp","tn","fp","fn","tot_samps","sens","spec","tpr","fpr","panel_subset","coverage")
+            ssout <- rbind(ssout,tssout)
+        }
       }
     }
   }
 }
 ssout1 <- type_convert(ssout)
 ssout1$spec1 <- 1-ssout1$spec
-p1 <- ggplot(ssout1,aes(VF,sens,color=factor(truth_rate,levels=levels(master_tbl_r$rate_group)))) +
-  theme_bw() +
-  scale_color_brewer("WES Rate Group",palette="Set2") +
-  geom_line() +
-  facet_grid(.~panel_subset) +
-  ggtitle("Sensitivity: TML Panel (By Panel Subset)")
-
-p2 <- ggplot(ssout1,aes(VF,spec,color=factor(truth_rate,levels=levels(master_tbl_r$rate_group)))) +
-  theme_bw() +
-  scale_color_brewer("WES Rate Group",palette="Set2") +
-  geom_line() +
-  facet_grid(.~panel_subset) +
-  ggtitle("Specificity: TML Panel (By Panel Subset)")
-
-grid.arrange(p1,p2,nrow=2)
+ssout1$truth_rate <- factor(ssout1$truth_rate,levels=levels(master_tbl_r$rate_group))
 ```
+
+```{r analyze sensitivity/specificity, fig.width=15,fig.height=6}
+# rsquared plot
+p1a <- ggplot(rsqdf,aes(vfthresh,rsq,color=rate_group)) + 
+  theme_bw() +
+  geom_line() +
+  #scale_color_brewer("",palette="Set2") +
+  scale_y_continuous("corr^2 Value",limits=c(0,1.0)) +
+  scale_x_continuous("VF Threshold") +
+  facet_grid(group~coverage) +
+  ggtitle("r^2 vs VF Threshold\n(By WES Mut Rate)") +
+  theme(legend.position="bottom")
+
+# Sens/Spec plots
+p1 <- ggplot(ssout1,aes(VF,sens,color=truth_rate)) +
+  theme_bw() +
+  #scale_color_brewer("WES Rate Group",palette="Set2") +
+  geom_line() +
+  facet_grid(panel_subset~coverage) +
+  ggtitle("Sensitivity: TML Panel\n(By Panel Subset)") +
+  theme(legend.position="none")
+
+p2 <- ggplot(ssout1,aes(VF,spec,color=truth_rate)) +
+  theme_bw() +
+  #scale_color_brewer("WES Rate Group",palette="Set2") +
+  geom_line() +
+  facet_grid(panel_subset~coverage) +
+  ggtitle("Specificity: TML Panel\n(By Panel Subset)") +
+  theme(legend.position="none")
+
+grid.arrange(p1a,p1,p2,ncol=3)
+
+```
+
+
 
 
 

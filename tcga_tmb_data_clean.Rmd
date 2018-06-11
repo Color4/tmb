@@ -1,0 +1,182 @@
+---
+title: "TMB TCGA analysis"
+output:
+  html_document:
+    df_print: paged
+  html_notebook:
+    df_print: paged
+---
+
+```{r global_options}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+```{r}
+# TMB TCGA check
+library(tidyverse)
+library(bedr)
+#library(rtracklayer)
+library(splitstackshape)
+library(gridExtra)
+library(scales)
+library(R.utils)
+library(caret)
+library(cutpointr)
+#setwd("/mnt/hgfs/danhovelson/Box Sync/Strata/")
+```
+
+```{r load tcga file, cache=TRUE, eval=FALSE, echo =FALSE}
+# only re-load full 'tcgatrim' df if needed
+
+# keep coding variation only
+#tcga <- tcgaraw[!tcgaraw$Variant_Classification %in% #c("Intron","3'Flank","3'UTR","5'Flank","5'UTR","RNA","Splice_Site","Translation_Start_Site"),]
+#save(tcga,file="../../analysis/tmb/tcga_sets/20180525.tcga_pancx_coding_variants.rda")
+#load("/mnt/hgfs/danhovelson/analysis/tmb/tcga_sets/20180525.tcga_pancx_coding_variants.rda")
+
+# Keep subset of columns to reduce memory impact
+
+#tcgatrim = tcga[,c("Chromosome","Start_Position","End_Position","Hugo_Symbol","Reference_Allele","Tumor_Seq_Allele1","Tumor_Seq_Allele2","Variant_Type","Variant_Classification","Consequence","Feature_type","VARIANT_CLASS","Tumor_Sample_Barcode","t_depth","t_ref_count","t_alt_count")]
+#save(tcgatrim,file="/mnt/hgfs/danhovelson/analysis/tmb/tcga_sets/20180525.tcga_pancx_coding_variants.trim_cols.rda")
+
+load(file="/mnt/hgfs/danhovelson/analysis/tmb/tcga_sets/20180525.tcga_pancx_coding_variants.trim_cols.rda")
+```
+
+```{r read in and set TCGA-in-TML indices, eval=FALSE}
+# set variant_id variable for full tcga coding variant index
+tcgavid <- read_tsv("/mnt/hgfs/danhovelson/analysis/bed/20180525.tcga_pancx_coding_variants.pos_idx.chr.bed",col_names = FALSE)
+colnames(tcgavid) <- c("Chromosome","Start_Position","End_Position","variant_id")
+tcgavid %>%
+  mutate(variant_hash = paste(gsub("chr","",Chromosome),Start_Position,End_Position,sep=";")) %>%
+  select(variant_hash, variant_id) -> tcgavid2
+remove(tcgavid)
+write_tsv(tcgavid2,"/mnt/hgfs/danhovelson/analysis/tmb/tcga_parsed_df.for_analysis.var_index.txt")
+```
+
+```{r ingest large tcga df, cache=TRUE, eval=FALSE}
+# only need to do once, so set 'eval=FALSE' for this chunk
+
+# remove single outlier sample affecting a number of downstream analyses
+tcga_ = tcgatrim[!tcgatrim$Tumor_Sample_Barcode %in% c("TCGA-13-0889-01A-01W-0420-08"),]
+
+# match index variable to detailed tcga calls df
+tcga <- tcga_ %>%
+  mutate(variant_hash = paste(Chromosome,Start_Position,End_Position,sep=";")) %>%
+  inner_join(tcgavid2,by=c("variant_hash"))
+remove(tcga_)
+
+# calculate variant_fraction & create categories/thresholds
+tcga$VF <- tcga$t_alt_count / tcga$t_depth
+write_tsv(tcga,"/mnt/hgfs/danhovelson/analysis/tmb/tcga_parsed_df.for_analysis.txt")
+```
+
+```{r review overall TCGA VF by depth, eval=FALSE, echo=FALSE}
+# load total tcga df
+#load("/mnt/hgfs/danhovelson/analysis/tmb/tcga_sets/20180525.tcga_pancx_coding_variants.trim_cols.rda")
+
+# calculate tcga vf and depth categories
+tcgatrim$vf <- tcgatrim$t_alt_count/tcgatrim$t_depth
+tcgatrim$vfcat <- cut(tcgatrim$vf,c(seq(0,0.5,0.1),1.0),include.lowest=TRUE)
+tcgatrim$depthcat <- cut(tcgatrim$t_depth,c(0,20,30,40,50,100,1000,1000000),include.lowest=TRUE)
+tcgatrim$vdepcat <- cut(tcgatrim$t_alt_count,c(0,2,5,10,15,20,50,100,100000),include.lowest=TRUE)
+
+# check vf vs. depth relationship
+ggplot(tcgatrim[tcgatrim$Chromosome %in% c(1),],aes(vf,t_depth)) + 
+  theme_bw() +
+  geom_point(alpha=0.01,position="jitter") + 
+  scale_y_log10() +
+  ggtitle("TCGA Coding Var Calls: VF vs. Coverage")
+
+ggplot(tcgatrim,aes(vfcat)) + 
+  theme_bw() +
+  geom_bar(aes(fill=depthcat)) +
+  ggtitle("TCGA Coding Var Calls: VF/Coverage Plot")
+
+ggplot(tcgatrim,aes(depthcat)) + 
+  theme_bw() +
+  geom_bar(aes(fill=vdepcat)) +
+  facet_grid(vfcat~.) +
+  ggtitle("TCGA Coding Var Calls: Coverage Plot")
+
+ggplot(tcgatrim,aes(vdepcat)) + 
+  theme_bw() +
+  geom_bar() +
+  facet_grid(vfcat~.) +
+  ggtitle("TCGA Coding Var Calls: Variant Depth Plot")
+
+# read in tcga truth mut rate (WES-based)
+tcgatruth <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/tcga_sets/20180525.tcga_pancx_coding_variants.wes_muts.gt_vf0_vdp5.rate_tbl.txt")
+
+# check effects of vf/coverage on mut rate calculation
+# ex: vf > 20%
+tcgafilter <- tcgatrim %>% filter(vf > 0.2)
+tfiltmut <- as.data.frame(table(tcgafilter$Tumor_Sample_Barcode))
+colnames(tfiltmut) <- c("Tumor_Sample_Barcode","filt_mut_count")
+tfiltmut$filt_mut_mb <- tfiltmut$filt_mut_count/38
+tcgatruth %>% 
+  left_join(tfiltmut,by=c("Tumor_Sample_Barcode")) %>%
+  ggplot(aes(filt_mut_mb,wes_mut_mb)) +
+  theme_bw() +
+  geom_point() + 
+  ggtitle("TCGA Coding Var Mut Rate: VF > 20%")
+
+# ex: coverage > 50
+tcgafilter <- tcgatrim %>% filter(t_depth > 50)
+tfiltmut <- as.data.frame(table(tcgafilter$Tumor_Sample_Barcode))
+colnames(tfiltmut) <- c("Tumor_Sample_Barcode","filt_mut_count")
+tfiltmut$filt_mut_mb <- tfiltmut$filt_mut_count/38
+tcgatruth %>% 
+  left_join(tfiltmut,by=c("Tumor_Sample_Barcode")) %>% 
+  ggplot(aes(filt_mut_mb,wes_mut_mb)) + 
+  theme_bw() +
+  geom_point() + 
+  ggtitle("TCGA Coding Var Mut Rate: TotalDepth > 50"
+```
+
+```{r TCGA calls in TML regions, cache=TRUE, message=FALSE, eval=FALSE}
+# read in tcga df for analysis
+tcga <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/tcga_parsed_df.for_analysis.txt")
+
+# ingest tcga-in-TML index, update to correct variant_id
+tcga_tml_idx_ <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/tcga_sets/20180525.tcga_pancx_coding_variants.IN_TML.uniq.bed",col_names = FALSE)
+colnames(tcga_tml_idx_) <- c("Chromosome","Start_Position","End_Position","old_variant_id")
+tcga_tml_idx_ %>%
+  mutate(variant_hash = paste(gsub("chr","",Chromosome),Start_Position,End_Position,sep=";")) %>%
+  left_join(tcgavid2,by=c("variant_hash")) %>%
+  select(-old_variant_id,-variant_hash) -> tcga_tml_idx
+
+# filter TCGA calls to those in all TML regions
+tcga_tml <- tcga %>%
+  filter(variant_id %in% unique(tcga_tml_idx$variant_id)) 
+
+## check pool 1 vs pool 2 vs all
+tcga_tml_pool1_idx <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/tcga_sets/20180525.tcga_pancx_coding_variants.IN_TML_pool1.bed",col_names = FALSE)
+colnames(tcga_tml_pool1_idx) <- c("Chromosome","Start_Position","End_Position","j1")
+tcga_tml_pool1_idx$pool1 <- "yes"
+tcga_tml_pool1_idx %>%
+  mutate(variant_hash = paste(gsub("chr","",Chromosome),Start_Position,End_Position,sep=";")) %>%
+  select(variant_hash,pool1) %>%
+  unique() -> ttmlpool1
+
+tcga_tml_pool2_idx <- read_tsv("/mnt/hgfs/danhovelson/analysis/tmb/tcga_sets/20180525.tcga_pancx_coding_variants.IN_TML_pool2.bed",col_names = FALSE)
+colnames(tcga_tml_pool2_idx) <- c("Chromosome","Start_Position","End_Position","j1")
+tcga_tml_pool2_idx$pool2 <- "yes"
+tcga_tml_pool2_idx %>%
+  mutate(variant_hash = paste(gsub("Oncomine_TML.20170222.designed.3col.bedchr","",Chromosome),Start_Position,End_Position,sep=";")) %>%
+  select(variant_hash, pool2) %>%
+  unique() -> ttmlpool2
+
+# annotate variants as in pool 1, 2, or both
+tcga_tml %>%
+  left_join(ttmlpool1,by=c("variant_hash")) %>%
+  left_join(ttmlpool2,by=c("variant_hash")) %>%
+  mutate(pool=ifelse(pool1 %in% c("yes") & pool2 %in% c("yes"),"both",
+                     ifelse(pool1 %in% c("yes"),"pool1","pool2"))) %>%
+  select(-pool1,-pool2) -> tcga_tml2
+
+# write_tsv for analysis
+write_tsv(tcga_tml2,"/mnt/hgfs/danhovelson/analysis/tmb/tcga_parsed_df.for_analysis.in_tml_regions.txt")
+
+```
+
+
+

@@ -1,3 +1,7 @@
+tcga_tmb_cache/
+tcga_tmb_files/
+tcga_tmb_simulation_cache/
+tcga_tmb_simulation_files/
 .Rproj.user
 .Rhistory
 .RData
